@@ -2025,13 +2025,18 @@ class Procar(object):
             }
     """
     def __init__(self, filename):
-        data = defaultdict(dict)
+        data = {Spin.up: defaultdict(dict), Spin.down: defaultdict(dict)}
+        bands = {Spin.up: defaultdict(dict), Spin.down: defaultdict(dict)}
+        head_patt = re.compile("^# of k-points:\s+(\d+)\s+# of bands:\s+(\d+)\s+# of ions:\s+(\d+)")
         headers = None
+        spin = None
         with zopen(filename, "rt") as f:
-            lines = list(clean_lines(f.readlines()))
+            #lines = list(clean_lines(f.readlines())) # here we loose information
+                                                      # on spin polarized calculations
+            lines = f.readlines()
             self.name = lines[0]
             kpointexpr = re.compile("^\s*k-point\s+(\d+).*weight = ([0-9\.]+)")
-            bandexpr = re.compile("^\s*band\s+(\d+)")
+            bandexpr = re.compile("^\s*band\s+(\d+)\s+# energy\s+([+-]?\d+\.\d+)\s+# occ\.\s+(\d+\.\d+)")
             ionexpr = re.compile("^ion.*")
             expr = re.compile("^\s*([0-9]+)\s+")
             dataexpr = re.compile("[\.0-9]+")
@@ -2039,9 +2044,22 @@ class Procar(object):
             current_kpoint = 0
             current_band = 0
             for l in lines:
-                if bandexpr.match(l):
+                if head_patt.match(l):
+                    if spin is None:
+                        m = head_patt.match(l)
+                        self._nb_kpoints = int(m.group(1))
+                        self._nb_bands = int(m.group(2))
+                        self._nb_ions = int(m.group(3))
+                        spin = Spin.up
+                    else:
+                        spin = Spin.down
+                elif bandexpr.match(l):
                     m = bandexpr.match(l)
                     current_band = int(m.group(1))
+                    band_ene = float(m.group(2))
+                    band_occ = float(m.group(3))
+                    bands[spin][current_band-1][current_kpoint-1] = \
+                        (band_ene, band_occ)
                 elif kpointexpr.match(l):
                     m = kpointexpr.match(l)
                     current_kpoint = int(m.group(1))
@@ -2056,14 +2074,14 @@ class Procar(object):
                     #Convert to zero-based indexing for atoms.
                     index = int(num_data.pop(0)) - 1
                     num_data.pop(-1)
-                    if current_kpoint not in data[index]:
-                        data[index][current_kpoint] = {"weight": weight,
-                                                       "bands": {}}
-                    data[index][current_kpoint]["bands"][current_band] = \
+                    if current_kpoint not in data[spin][index]:
+                        data[spin][index][current_kpoint] = {"weight": weight,
+                                                             "bands": {}}
+                    data[spin][index][current_kpoint]["bands"][current_band] = \
                         dict(zip(headers, num_data))
+
             self.data = data
-            self._nb_kpoints = len(data[0].keys())
-            self._nb_bands = len(data[0][1]["bands"].keys())
+            self.bands = bands
 
     @property
     def nb_bands(self):
@@ -2079,6 +2097,13 @@ class Procar(object):
         """
         return self._nb_kpoints
 
+    @property
+    def nb_ions(self):
+        """
+        Returns the number of ions in the band structure calculation
+        """
+        return self._nb_ions
+
     def get_projection_on_elements(self, structure):
         """
         Method returning a dictionary of projections on elements.
@@ -2090,17 +2115,22 @@ class Procar(object):
         Returns:
             a dictionary in the {Spin.up:[k index][b index][{Element:values}]]
         """
-        dico = {Spin.up: []}
-        dico[Spin.up] = [[defaultdict(float)
-                          for i in range(self._nb_kpoints)]
-                         for j in range(self.nb_bands)]
+        dico = {Spin.up: [], Spin.down: []}
+        for spin in dico:
+            dico[spin] = [[defaultdict(float)
+                              for i in range(self._nb_kpoints)]
+                             for j in range(self.nb_bands)]
 
-        for iat in self.data:
-            name = structure.species[iat].symbol
-            for k in self.data[iat]:
-                for b in self.data[iat][k]["bands"]:
-                    dico[Spin.up][b-1][k-1][name] = \
-                        sum(self.data[iat][k]["bands"][b].values())
+            for iat in self.data[spin]:
+                name = structure.species[iat].symbol
+                for k in self.data[spin][iat]:
+                    for b in self.data[spin][iat][k]["bands"]:
+                        if name in dico[spin][b-1][k-1]:
+                            dico[spin][b-1][k-1][name] += \
+                                sum(self.data[spin][iat][k]["bands"][b].values())
+                        else:
+                            dico[spin][b-1][k-1][name] = \
+                                sum(self.data[spin][iat][k]["bands"][b].values())
 
         return dico
 
@@ -2120,17 +2150,21 @@ class Procar(object):
                 of that orbital is returned.
 
         Returns:
-            Sum occupation of orbital of atom.
+            Sum occupation of orbital of atom for each spin component.
+            
+        TODO: Warning, here weight is not band occupation but the kpoints weight.
+        Does this method compute really occupation ?
         """
-        total = 0
+        total = {Spin.up:0, Spin.down:0}
         found = False
-        for kpoint, d in self.data[atom_index].items():
-            wt = d["weight"]
-            for band, dd in d["bands"].items():
-                for orb, v in dd.items():
-                    if orb.startswith(orbital):
-                        found = True
-                        total += v * wt
+        for spin in self.data:
+            for kpoint, d in self.data[spin][atom_index].items():
+                wt = d["weight"]
+                for band, dd in d["bands"].items():
+                    for orb, v in dd.items():
+                        if orb.startswith(orbital):
+                            found = True
+                            total[spin] += v * wt
         if not found:
             raise ValueError("Invalid orbital {}".format(orbital))
         return total
