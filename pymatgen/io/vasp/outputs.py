@@ -2008,7 +2008,7 @@ class Procar(object):
         converted to zero-based indexing in this parser to be consistent with
         representation of structures in pymatgen::
 
-            {
+            {Spin.up : {
                 atom_index: {
                     kpoint_index: {
                         "bands": {
@@ -2022,12 +2022,34 @@ class Procar(object):
                         "weight": 0.03125
                     },
                     ...
-            }
+                }
+            },
+            Spin.down: { ... }}
+
+    .. attribute:: bands
+
+        {Spin.up: val[band][kpt], Spin.down: val[band][kpt]}
+
+        val[band][kpt] = (eigenvalue, occupation) where band is the band number
+        index and kpt is the kpoints number index.
+
+    .. attribute:: kpoints
+
+        List of kpoints coordinates in the reciprocal lattice as numpy arrays.
+
+    .. attribute:: kpoints_weight
+
+        List of kpoints weight.
+
     """
     def __init__(self, filename):
-        data = {Spin.up: defaultdict(dict), Spin.down: defaultdict(dict)}
-        bands = {Spin.up: defaultdict(dict), Spin.down: defaultdict(dict)}
-        head_patt = re.compile("^# of k-points:\s+(\d+)\s+# of bands:\s+(\d+)\s+# of ions:\s+(\d+)")
+        data = {Spin.up: defaultdict(dict)}
+        bands = {Spin.up: list()}
+        kpoints = list()
+        kpoints_weights = list()
+        head_patt = re.compile("^# of k-points:\s+(\d+)\s+" + 
+                               "# of bands:\s+(\d+)\s+" + 
+                               "# of ions:\s+(\d+)")
         headers = None
         spin = None
         with zopen(filename, "rt") as f:
@@ -2035,8 +2057,12 @@ class Procar(object):
                                                       # on spin polarized calculations
             lines = f.readlines()
             self.name = lines[0]
-            kpointexpr = re.compile("^\s*k-point\s+(\d+).*weight = ([0-9\.]+)")
-            bandexpr = re.compile("^\s*band\s+(\d+)\s+# energy\s+([+-]?\d+\.\d+)\s+# occ\.\s+(\d+\.\d+)")
+            kpointexpr = re.compile("^\s*k-point\s+(\d+) :\s+" +
+                                    "([+-]?\d+\.\d+)\s+" * 3 +
+                                    "weight = (\d+\.\d+)")
+            bandexpr = re.compile("^\s*band\s+(\d+)\s+" + 
+                                  "# energy\s+([+-]?\d+\.\d+)\s+" + 
+                                  "# occ\.\s+(\d+\.\d+)")
             ionexpr = re.compile("^ion.*")
             expr = re.compile("^\s*([0-9]+)\s+")
             dataexpr = re.compile("[\.0-9]+")
@@ -2051,8 +2077,13 @@ class Procar(object):
                         self._nb_bands = int(m.group(2))
                         self._nb_ions = int(m.group(3))
                         spin = Spin.up
+                        bands[Spin.up] = [[0. for k in range(self._nb_kpoints)]
+                                                for b in range(self._nb_bands)]
                     else:
                         spin = Spin.down
+                        data[Spin.down] = defaultdict(dict)
+                        bands[Spin.down] = [[0. for k in range(self._nb_kpoints)]
+                                                 for b in range(self._nb_bands)]
                 elif bandexpr.match(l):
                     m = bandexpr.match(l)
                     current_band = int(m.group(1))
@@ -2061,9 +2092,12 @@ class Procar(object):
                     bands[spin][current_band-1][current_kpoint-1] = \
                         (band_ene, band_occ)
                 elif kpointexpr.match(l):
-                    m = kpointexpr.match(l)
-                    current_kpoint = int(m.group(1))
-                    weight = float(m.group(2))
+                    grp = kpointexpr.match(l).groups()
+                    current_kpoint = int(grp[0])
+                    weight = float(grp[4])
+                    if spin == Spin.up:
+                        kpoints_weights.append(weight)
+                        kpoints.append(np.array([float(v) for v in grp[1:4]]))
                 elif headers is None and ionexpr.match(l):
                     headers = l.split()
                     headers.pop(0)
@@ -2082,6 +2116,8 @@ class Procar(object):
 
             self.data = data
             self.bands = bands
+            self.kpoints = kpoints
+            self.kpoints_weights = kpoints_weights
 
     @property
     def nb_bands(self):
