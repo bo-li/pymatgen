@@ -2040,6 +2040,16 @@ class Procar(object):
     .. attribute:: kpoints_weight
 
         List of kpoints weight.
+        
+    .. method:: get_band_structure
+    
+        Return a electronic_structure.BandStructure object
+        
+        Args :
+            structure: structure object
+            kpoints_filename (str): name of KPOINTS file
+            efermi (float): fermi level
+            line_mode (bool): enforce the line mode to be considered
 
     """
     def __init__(self, filename):
@@ -2047,8 +2057,8 @@ class Procar(object):
         bands = {Spin.up: list()}
         kpoints = list()
         kpoints_weights = list()
-        head_patt = re.compile("^# of k-points:\s+(\d+)\s+" + 
-                               "# of bands:\s+(\d+)\s+" + 
+        head_patt = re.compile("^# of k-points:\s+(\d+)\s+" +
+                               "# of bands:\s+(\d+)\s+" +
                                "# of ions:\s+(\d+)")
         headers = None
         spin = None
@@ -2060,8 +2070,8 @@ class Procar(object):
             kpointexpr = re.compile("^\s*k-point\s+(\d+) :\s+" +
                                     "([+-]?\d+\.\d+)\s+" * 3 +
                                     "weight = (\d+\.\d+)")
-            bandexpr = re.compile("^\s*band\s+(\d+)\s+" + 
-                                  "# energy\s+([+-]?\d+\.\d+)\s+" + 
+            bandexpr = re.compile("^\s*band\s+(\d+)\s+" +
+                                  "# energy\s+([+-]?\d+\.\d+)\s+" +
                                   "# occ\.\s+(\d+\.\d+)")
             ionexpr = re.compile("^ion.*")
             expr = re.compile("^\s*([0-9]+)\s+")
@@ -2205,6 +2215,97 @@ class Procar(object):
             raise ValueError("Invalid orbital {}".format(orbital))
         return total
 
+    def get_band_structure(self, structure, kpoints_filename=None, efermi=None,
+                           line_mode=False):
+        """
+        Returns the band structure as a BandStructure object
+
+        Args:
+            structure (Structure): A Structure object
+            kpoints_filename (str): Full path of the KPOINTS file from which
+                the band structure is generated.
+                If none is provided, the code will try to intelligently
+                determine the appropriate KPOINTS file by substituting the
+                filename of the vasprun.xml with KPOINTS.
+                The latter is the default behavior.
+            efermi (float): Needed because not present in POSCAR file
+            line_mode (bool): Force the band structure to be considered as
+                a run along symmetry lines.
+
+        Returns:
+            a BandStructure object (or more specifically a
+            BandStructureSymmLine object if the run is detected to be a run
+            along symmetry lines)
+
+            TODO : hybrid calculations
+        """
+        if not kpoints_filename:
+            kpoints_filename = 'KPOINTS'
+        if not os.path.exists(kpoints_filename) and line_mode is True:
+            raise VaspParserError('KPOINTS needed to obtain band structure '
+                                  'along symmetry lines.')
+
+        kpoint_file = None
+        if os.path.exists(kpoints_filename):
+            kpoint_file = Kpoints.from_file(kpoints_filename)
+            if kpoint_file.style == "Line_mode":
+                line_mode = True
+
+        if efermi is None:
+            raise ValueError("efermi is needed")
+
+        # fill in eigenvals, occupation
+        eigenvals = dict()
+        eigenvals[Spin.up] = [[self.bands[Spin.up][b][k][0]
+                                for k in range(self._nb_kpoints)]
+                                    for b in range(self._nb_bands)]
+        if Spin.down in self.bands:
+            eigenvals[Spin.down] = [[self.bands[Spin.down][b][k][0]
+                                      for k in range(self._nb_kpoints)]
+                                          for b in range(self._nb_bands)]
+
+        # fill in projected eigenvals
+        get_orb = Orbital.from_string
+        p_eigenvals = dict()
+        p_eigenvals[Spin.up] = [[
+            {
+            get_orb(orb): [self.data[Spin.up][iat][k+1]["bands"][b+1][orb]
+                for iat in range(self._nb_ions)]
+                    for orb in self.data[Spin.up][0][k+1]["bands"][b+1]
+            }
+            for k in range(self._nb_kpoints)]
+                for b in range(self._nb_bands)]
+
+        if Spin.down in self.data:
+            p_eigenvals[Spin.down] = [[
+                {
+                get_orb(orb): [self.data[Spin.down][iat][k+1]["bands"][b+1][orb]
+                    for iat in range(self._nb_ions)]
+                        for orb in self.data[Spin.down][0][k+1]["bands"][b+1]
+                }
+                for k in range(self._nb_kpoints)]
+                    for b in range(self._nb_bands)]
+
+        # reciprocal lattice
+        lattice_rec = structure.lattice.reciprocal_lattice
+
+        # return band structure
+        if line_mode:
+            if "" in kpoint_file.labels:
+                raise Exception("A band structure along symmetry lines "
+                                "requires a label for each kpoint. "
+                                "Check your KPOINTS file")
+            labels_dict = dict(zip(kpoint_file.labels, kpoint_file.kpt))
+            labels_dict.pop(None, None)
+
+            return BandStructureSymmLine(self.kpoints, eigenvals, lattice_rec,
+                                         efermi, labels_dict,
+                                         structure=structure,
+                                         projections=p_eigenvals)
+        else:
+            return BandStructure(self.kpoints, eigenvals, lattice_rec, efermi,
+                                 structure=structure,
+                                 projections=p_eigenvals)
 
 class Oszicar(object):
     """
